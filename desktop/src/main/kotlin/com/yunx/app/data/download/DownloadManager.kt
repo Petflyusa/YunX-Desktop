@@ -884,6 +884,9 @@ class DownloadManager(
      * 是纯 HTTP Range 实现，喂它 magnet:/ed2k:/本地种子路径只会得到没意义的报错 —— 所以这里宁可
      * 拦住并说清楚要做什么。
      */
+    /** 磁力 / ed2k / 种子当前能否下载：null = 可以，否则是给用户看的原因（解析页入队前先问一声） */
+    fun p2pUnavailableReason(): String? = p2pBlockReason(true)
+
     private fun p2pBlockReason(isP2P: Boolean): String? {
         if (!isP2P) return null
         if (!GopeedEngine.isInstalled()) {

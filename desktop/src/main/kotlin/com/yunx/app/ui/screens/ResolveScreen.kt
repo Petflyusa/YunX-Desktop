@@ -143,7 +143,9 @@ fun ResolveScreen(
 
     // 视频链接优先分流：抖音/快手/B站等域名交给视频解析页，其余仍走网盘/GitHub 解析
     val resolveLink: (String, String?) -> Unit = { text, code ->
-        if (VideoLinkParser.looksLikeVideoLink(text)) onVideoLink(text) else viewModel.startResolve(text, code)
+        // 磁力 / ed2k 优先：交给 ViewModel 直接建 P2P 下载任务（磁力的 dn 里可能带视频站名，不能先被视频分流截走）
+        if (com.yunx.app.data.download.P2PLink.extract(text) != null) viewModel.startResolve(text, code)
+        else if (VideoLinkParser.looksLikeVideoLink(text)) onVideoLink(text) else viewModel.startResolve(text, code)
     }
 
     // 剪贴板分享链接提示状态：待提示的剪贴板文本 + 已忽略的文本
@@ -160,7 +162,8 @@ fun ResolveScreen(
             text != link &&
             text != ignoredClipboard &&
             (ShareLinkParser.parse(text) != null || GitHubLinkParser.parse(text) != null ||
-                VideoLinkParser.looksLikeVideoLink(text))
+                VideoLinkParser.looksLikeVideoLink(text) ||
+                com.yunx.app.data.download.P2PLink.extract(text) != null)
         ) {
             clipboardSuggestion = text
         }
@@ -387,9 +390,12 @@ fun ResolveScreen(
                 val parsed = ShareLinkParser.parse(suggestion)
                 val githubParsed = GitHubLinkParser.parse(suggestion)
                 val videoParsed = VideoLinkParser.parse(suggestion)
+                val p2pParsed = com.yunx.app.data.download.P2PLink.extract(suggestion)
                 ClipboardSuggestCard(
                     // 标题按识别结果给（视频链接此前一律显示成「网盘」，用户会误解）
                     title = when {
+                        p2pParsed != null && com.yunx.app.data.download.Ed2kLink.isEd2k(p2pParsed) -> "检测到 ed2k 电驴链接"
+                        p2pParsed != null -> "检测到磁力链接"
                         githubParsed != null -> "检测到 GitHub 分享链接"
                         parsed != null -> "检测到 ${platformLabel(parsed.platform)}分享链接"
                         videoParsed != null -> "检测到 ${videoParsed.platform.displayName} 视频链接"
@@ -398,6 +404,8 @@ fun ResolveScreen(
                     onPaste = {
                         clipboardSuggestion = null
                         when {
+                            // 磁力 / ed2k：直接建下载任务（引擎不可用时解析页会显示原因）
+                            p2pParsed != null -> viewModel.startResolve(suggestion, null)
                             // GitHub 链接走 ViewModel 的 GitHub 解析入口（复用 ShareDetailScreen 框架）
                             githubParsed != null -> {
                                 link = suggestion
@@ -512,7 +520,7 @@ private fun ResolveInputContent(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "粘贴分享链接，一键解析分享内容",
+                text = "粘贴分享链接，一键解析分享内容（也支持磁力 / ed2k 链接）",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f)

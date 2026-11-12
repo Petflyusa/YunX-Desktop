@@ -879,11 +879,41 @@ class ResolveViewModel(
 
     fun consumePrefill(): String? = prefillRequest.also { prefillRequest = null }
 
+    /**
+     * 磁力 / ed2k 链接入队：先确认 Gopeed 引擎可用（不可用时在解析页直接说明原因，不落一条失败任务），
+     * 再以链接自带的显示名建任务（真实资源名等引擎拿到元数据后覆盖），成功后切到「下载」页。
+     */
+    private fun startP2PDownload(p2pUrl: String, original: String) {
+        lastResolveInput = original
+        val reason = downloadManager.p2pUnavailableReason()
+        if (reason != null) {
+            prefillRequest = original
+            uiState = ResolveUiState.Error(reason)
+            return
+        }
+        viewModelScope.launch {
+            try {
+                downloadManager.enqueue(url = p2pUrl, fileName = "")
+                uiState = ResolveUiState.Idle
+                downloadStarted = true
+            } catch (e: Exception) {
+                Log.e("ResolveVM", "startP2PDownload failed: ${e.javaClass.simpleName}: ${e.message}", e)
+                prefillRequest = original
+                uiState = ResolveUiState.Error("磁力任务创建失败：${e.message ?: e.javaClass.simpleName}")
+            }
+        }
+    }
+
     /** 最近一次 startResolve 的原文（口令转换之前），失败时原样回填 */
     private var lastResolveInput: String = ""
 
     /** 开始解析：链接 → token →（密码）→ 根目录列表 */
     fun startResolve(link: String, pwd: String?) {
+        // 磁力 / ed2k：不是网盘分享，直接交给下载引擎（Gopeed）建任务，然后切到「下载」页
+        com.yunx.app.data.download.P2PLink.extract(link)?.let { p2p ->
+            startP2PDownload(p2p, original = link)
+            return
+        }
         lastResolveInput = link
         currentLink = link
         currentPwd = pwd

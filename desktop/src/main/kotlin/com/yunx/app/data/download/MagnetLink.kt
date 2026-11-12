@@ -126,6 +126,27 @@ object Ed2kLink {
  */
 object P2PLink {
 
+    /** 文本里的磁力链接：`magnet:?` 起，到空白 / 引号 / 尖括号为止 */
+    private val MAGNET_IN_TEXT = Regex("(?i)magnet:\\?[^\\s\"'<>]+")
+
+    /** 文本里的 ed2k 文件链接：`ed2k://|file|…|/`（段内不含空白时才认） */
+    private val ED2K_IN_TEXT = Regex("(?i)ed2k://\\|file\\|[^\\s\"'<>]+?\\|/")
+
+    /** 磁力链接必须带 info hash（`xt=urn:btih:`），否则引擎无从下载 */
+    private val BTIH_PARAM = Regex("(?i)xt=urn:btih:[A-Za-z0-9]{32,40}")
+
+    /**
+     * 从一段粘贴文本（可能前后夹着说明文字）里取出第一个**可下载**的磁力 / ed2k 链接；没有返回 null。
+     * 解析页、剪贴板检测用它：粘贴整段「资源名 + 磁力链接」也能识别。
+     */
+    fun extract(text: String): String? {
+        MAGNET_IN_TEXT.find(text)?.value?.trimEnd('.', ',', '，', '。', ')', '）')
+            ?.takeIf { BTIH_PARAM.containsMatchIn(it) }
+            ?.let { return it }
+        ED2K_IN_TEXT.find(text)?.value?.takeIf { Ed2kLink.isEd2k(it) }?.let { return it }
+        return null
+    }
+
     /** 是否需要 Gopeed 引擎（内置下载器不支持） */
     fun matches(url: String): Boolean =
         MagnetLink.isMagnet(url) || Ed2kLink.isEd2k(url) || isTorrentFile(url)
