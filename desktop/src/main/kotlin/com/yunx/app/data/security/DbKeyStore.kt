@@ -108,7 +108,19 @@ object DbKeyStore {
     fun switchLevel(file: File, from: DbEncryptionLevel, to: DbEncryptionLevel) {
         require(to.isSupported) { "该加密等级暂未支持：${to.label}" }
         val key = loadOrCreate(file, from)
+        val old = runCatching { String(file.readBytes(), Charsets.UTF_8) }.getOrDefault("")
         writeWrapAtomically(file, key, to)
+        // macOS：新文件已写好并校验通过，旧的钥匙串条目不再被引用，顺手删掉，避免反复切档留下孤儿条目
+        val oldKeychain = "${PREFIX}keychain:v1:"
+        if (OsPlatform.isMac && old.startsWith(oldKeychain)) {
+            val account = old.removePrefix(oldKeychain).trim()
+            val now = runCatching { String(file.readBytes(), Charsets.UTF_8) }.getOrDefault("")
+            if (account.isNotEmpty() && !now.contains(account)) {
+                OsPlatform.runForOutput(
+                    SECURITY_BIN, "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account
+                )
+            }
+        }
     }
 
     /** 按档位解包；失败时抛出（调用方据此提示并保持现档位） */

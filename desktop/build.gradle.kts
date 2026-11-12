@@ -33,7 +33,6 @@ val macJcefJvmArgs = listOf(
     "--add-opens=java.desktop/sun.awt=ALL-UNNAMED",
     "--add-opens=java.desktop/sun.lwawt=ALL-UNNAMED",
     "--add-opens=java.desktop/sun.lwawt.macosx=ALL-UNNAMED",
-    "--add-opens=java.desktop/java.awt=ALL-UNNAMED",
     "-Dapple.awt.application.appearance=system"
 )
 
