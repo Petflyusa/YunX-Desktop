@@ -38,6 +38,11 @@ fun main(args: Array<String>) {
     // OPENGL（ANGLE）两者兼顾。如需其他后端可设 YUNXPC_RENDER_API=SOFTWARE / DIRECT3D。
     val osName = System.getProperty("os.name", "").lowercase()
 
+    // macOS：菜单栏应用名（未设置时显示主类名 MainKt）
+    if (com.yunx.app.util.OsPlatform.isMac) {
+        System.setProperty("apple.awt.application.name", "云析")
+    }
+
     // 桌面上下文初始化（数据目录等）
     AppContext.init()
 
@@ -276,9 +281,37 @@ fun main(args: Array<String>) {
             }
             // 系统托盘：JNA 调 Win32 TrackPopupMenu（原生菜单，中文正常，暗色跟随系统）
             androidx.compose.runtime.LaunchedEffect(Unit) {
+                // macOS：点 Dock 图标时把（可能已隐藏到菜单栏的）主窗口拉回来；Cmd+Q 走与托盘「退出」相同的流程
+                if (com.yunx.app.util.OsPlatform.isMac) {
+                    runCatching {
+                        val desktop = java.awt.Desktop.getDesktop()
+                        desktop.addAppEventListener(java.awt.desktop.AppReopenedListener {
+                            java.awt.EventQueue.invokeLater { DesktopActions.bringWindowToFront(mainWindow) }
+                        })
+                        desktop.setQuitHandler { _, response ->
+                            java.awt.EventQueue.invokeLater {
+                                saveWindowPosition(mainWindow)
+                                exitApplication()
+                            }
+                            response.cancelQuit()
+                        }
+                    }
+                }
                 TrayManager.loadTrayIcon()?.let { icon ->
                     TrayManager.install(
                         image = icon,
+                        macMenu = listOf(
+                            "显示主窗口" to {
+                                java.awt.EventQueue.invokeLater { DesktopActions.bringWindowToFront(mainWindow) }
+                            },
+                            "-" to {},
+                            "退出" to {
+                                java.awt.EventQueue.invokeLater {
+                                    saveWindowPosition(mainWindow)
+                                    exitApplication()
+                                }
+                            }
+                        ),
                         onLeftClick = { DesktopActions.bringWindowToFront(mainWindow) },
                         onRightClick = { x, y ->
                             val cmd = Win32PopupMenu.show(

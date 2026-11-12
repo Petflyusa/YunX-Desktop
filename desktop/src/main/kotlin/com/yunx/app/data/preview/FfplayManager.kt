@@ -9,6 +9,7 @@ import com.yunx.app.data.network.HttpClients
 import com.yunx.app.data.network.video.VideoMedia
 import com.yunx.app.data.prefs.SettingsRepository
 import com.yunx.app.util.Log
+import com.yunx.app.util.OsPlatform
 import com.yunx.app.util.WindowsTitleBar
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -50,10 +51,21 @@ object FfplayManager {
 
     private const val TAG = "YunX-Ffplay"
 
-    private const val EXE_NAME = "ffplay.exe"
+    private val EXE_NAME = OsPlatform.exe("ffplay")
 
     /** DASH 合轨用到的可执行文件（与 ffplay 同包，一起解出来） */
-    private const val FFMPEG_EXE = "ffmpeg.exe"
+    private val FFMPEG_EXE = OsPlatform.exe("ffmpeg")
+
+    /**
+     * macOS 静态构建（martin-riedl.de，每个工具一个 zip，包内就是裸可执行文件）。
+     * `redirect/latest` 始终指向最新 release；按 CPU 架构选 arm64 / amd64。
+     */
+    private fun macZipUrl(tool: String): String =
+        "https://ffmpeg.martin-riedl.de/redirect/latest/macos/" +
+            (if (OsPlatform.isArm64) "arm64" else "amd64") + "/release/$tool.zip"
+
+    /** 本平台是否支持 ffplay / ffmpeg 外部引擎（Windows 与 macOS） */
+    private fun supported(): Boolean = isWindows() || OsPlatform.isMac
 
     /** ffplay 默认 UA 是 `Lavf/...`，很多平台的 CDN 会因此 403，缺省补一个 Chrome UA */
     private const val DEFAULT_UA =
@@ -135,7 +147,14 @@ object FfplayManager {
             add(File(it, "Microsoft/WinGet/Links"))
             add(File(it, "Programs/ffmpeg/bin"))
         }
-        add(File("C:/ffmpeg/bin"))
+        if (OsPlatform.isMac) {
+            // macOS 图形应用拿不到终端里的 PATH，Homebrew / MacPorts 目录要显式列出
+            add(File("/opt/homebrew/bin"))
+            add(File("/usr/local/bin"))
+            add(File("/opt/local/bin"))
+        } else {
+            add(File("C:/ffmpeg/bin"))
+        }
     }
 
     @Volatile
@@ -158,7 +177,7 @@ object FfplayManager {
      */
     @Synchronized
     fun locate(forceRefresh: Boolean = false): File? {
-        if (!isWindows()) return null
+        if (!supported()) return null
         if (!forceRefresh && checked) return cached
         val found = detectExe(EXE_NAME, privateExe)
         cached = found
@@ -172,7 +191,7 @@ object FfplayManager {
      */
     @Synchronized
     fun locateFfmpeg(forceRefresh: Boolean = false): File? {
-        if (!isWindows()) return null
+        if (!supported()) return null
         if (!forceRefresh && checkedFfmpeg) return cachedFfmpeg
         val found = detectExe(FFMPEG_EXE, privateFfmpeg)
         cachedFfmpeg = found
@@ -233,7 +252,8 @@ object FfplayManager {
      * 依次尝试 [candidates]，全部失败返回最后一个错误；协程取消会原样抛出。
      */
     suspend fun download(onProgress: (Long, Long) -> Unit = { _, _ -> }): Result<File> {
-        if (!isWindows()) return Result.failure(IOException("仅支持 Windows"))
+        if (!supported()) return Result.failure(IOException("仅支持 Windows / macOS"))
+        if (OsPlatform.isMac) return downloadMac(onProgress)
         return withContext(Dispatchers.IO) {
             // OkHttp 的 execute() 是阻塞的、不响应协程取消；用「看门狗」子协程在取消瞬间
             // 把所有在飞 Call 一并 cancel()，否则用户点「取消下载」会毫无反应。
@@ -457,6 +477,87 @@ object FfplayManager {
         } finally {
             registry.remove(call)
         }
+    }
+
+    /**
+     * macOS：依次下载 ffplay / ffmpeg / ffprobe 三个 zip 并解到 `installDir/bin`。
+     * 进度按三个文件累计（总量取已知文件大小之和，未知时只报已下载量）。
+     */
+    private suspend fun downloadMac(onProgress: (Long, Long) -> Unit): Result<File> = withContext(Dispatchers.IO) {
+        val registry = CallRegistry()
+        val watchdog = launch {
+            try {
+                awaitCancellation()
+            } finally {
+                registry.cancelAll()
+            }
+        }
+        try {
+            val client = HttpClients.downloadClient()
+            val outBin = File(installDir, "bin").apply { mkdirs() }
+            var finishedBytes = 0L
+            for (tool in listOf("ffplay", "ffmpeg", "ffprobe")) {
+                val tmp = File(AppContext.cacheDir, "ffmpeg-$tool-${System.currentTimeMillis()}.zip")
+                try {
+                    val url = macZipUrl(tool)
+                    val base = finishedBytes
+                    val report: (Long, Long) -> Unit = { done, total ->
+                        onProgress(base + done, if (total > 0) base + total else -1L)
+                    }
+                    val parallelOk = try {
+                        downloadParallel(client, registry, url, tmp, report)
+                    } catch (t: Throwable) {
+                        if (t is CancellationException) throw t
+                        currentCoroutineContext().ensureActive()
+                        false
+                    }
+                    if (!parallelOk) downloadStream(client, registry, url, tmp, report)
+                    finishedBytes += tmp.length()
+                    extractMacBinary(tmp, tool, outBin)
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    currentCoroutineContext().ensureActive()
+                    // ffprobe 只用于回写真实大小，缺了不影响预览与合轨
+                    if (tool == "ffprobe") {
+                        Log.w(TAG, "获取 ffprobe 失败（忽略）: ${t.message}")
+                    } else {
+                        Log.w(TAG, "获取 $tool 失败: ${t.message}")
+                        return@withContext Result.failure(t)
+                    }
+                } finally {
+                    runCatching { tmp.delete() }
+                }
+            }
+            val exe = privateExe
+            if (!exe.isFile) return@withContext Result.failure(IOException("未能获取 ffplay"))
+            cached = exe
+            checked = true
+            cachedFfmpeg = privateFfmpeg.takeIf { it.isFile }
+            checkedFfmpeg = true
+            Log.i(TAG, "ffmpeg（macOS）下载完成: ${exe.absolutePath}")
+            Result.success(exe)
+        } finally {
+            watchdog.cancel()
+        }
+    }
+
+    /** macOS zip：包内只有一个与工具同名的裸可执行文件 */
+    private fun extractMacBinary(zip: File, tool: String, outBin: File) {
+        var found = false
+        ZipInputStream(zip.inputStream().buffered()).use { zis ->
+            while (true) {
+                val entry = zis.nextEntry ?: break
+                val name = entry.name.replace('\\', '/').substringAfterLast('/')
+                if (!entry.isDirectory && name == tool) {
+                    val outFile = File(outBin, tool)
+                    outFile.outputStream().buffered().use { out -> zis.copyTo(out) }
+                    OsPlatform.makeExecutable(outFile)
+                    found = true
+                }
+                zis.closeEntry()
+            }
+        }
+        if (!found) throw IOException("压缩包中未找到 $tool")
     }
 
     /** 从 zip 中只提取 bin 目录下的 exe / dll 到 `installDir/bin`（静态构建只需解出这几个文件） */

@@ -32,10 +32,28 @@ object TrayManager {
     fun install(
         image: BufferedImage,
         onLeftClick: () -> Unit,
-        onRightClick: (Int, Int) -> Unit
+        onRightClick: (Int, Int) -> Unit,
+        /** macOS 菜单栏图标用的菜单项（"-" 为分隔线）；macOS 走 AWT 原生 NSMenu，不用 Win32 菜单 */
+        macMenu: List<Pair<String, () -> Unit>> = emptyList()
     ) {
         if (!SystemTray.isSupported()) return
         if (trayIcon != null) uninstall()
+
+        if (OsPlatform.isMac) {
+            val menu = PopupMenu()
+            macMenu.forEach { (label, action) ->
+                if (label == "-") menu.addSeparator()
+                else menu.add(java.awt.MenuItem(label).apply { addActionListener { action() } })
+            }
+            // 菜单栏图标约 18pt 高，交给系统按 Retina 缩放
+            val icon = TrayIcon(image.getScaledInstance(36, 36, Image.SCALE_SMOOTH), "云析 YunX-Desktop", menu)
+                .apply { isImageAutoSize = true }
+            runCatching {
+                SystemTray.getSystemTray().add(icon)
+                trayIcon = icon
+            }
+            return
+        }
 
         val icon = TrayIcon(image.getScaledInstance(16, 16, Image.SCALE_SMOOTH), "云析 YunX-Desktop").apply {
             isImageAutoSize = true
@@ -75,6 +93,11 @@ object TrayManager {
      * 这里不能用 Compose 的 TrayState —— 托盘图标已改为手写 AWT TrayIcon，没有 TrayState 实例。
      */
     fun showNotification(title: String, message: String) {
+        // macOS：AWT 托盘气泡不可靠，改用系统通知中心
+        if (OsPlatform.isMac) {
+            OsPlatform.macNotify(title, message)
+            return
+        }
         val icon = trayIcon ?: return
         runCatching { icon.displayMessage(title, message, TrayIcon.MessageType.NONE) }
             .onFailure { Log.w("YunX-Tray", "showNotification failed: ${it.message}") }

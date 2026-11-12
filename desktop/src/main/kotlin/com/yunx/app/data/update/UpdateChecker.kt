@@ -203,6 +203,11 @@ object UpdateChecker {
                     }
                 }
             }
+            // macOS：只认带 .dmg 的版本。上游 Release 只有 Windows 安装包时一律视为「无更新」，
+            // 避免给 Mac 用户弹 Windows 下载、更避免「强制更新」把 Mac 版锁死。
+            if (com.yunx.app.util.OsPlatform.isMac && assets.none { it.name.endsWith(".dmg", true) }) {
+                return@runCatching null
+            }
             val rawBody = json.optString("body")
             // 强制更新字段从**原始正文**解析（清洗只去头图/徽章，这里用原文更稳）
             val (mandatory, minMandatoryVersion) = parseMandatory(rawBody)

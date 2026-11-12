@@ -50,6 +50,7 @@ object SystemProxy {
      * 调用方据此装配全局代理；本函数只读一次注册表。
      */
     fun inspect(): Inspect {
+        if (com.yunx.app.util.OsPlatform.isMac) return inspectMac()
         if (!isWindows) {
             Log.i(TAG, "非 Windows 平台，不支持系统代理，按直连处理")
             return Inspect.Unavailable
@@ -155,6 +156,31 @@ object SystemProxy {
             // 无端口（或裸 IPv6）：用协议默认端口
             Inspect.Proxy(v, defaultPort)
         }
+    }
+
+    /**
+     * macOS：解析 `scutil --proxy`（系统设置 → 网络 → 代理）。
+     * 优先 HTTP，其次 HTTPS，最后 SOCKS；开启了 PAC（ProxyAutoConfigEnable=1）按不支持处理。
+     */
+    private fun inspectMac(): Inspect {
+        val out = com.yunx.app.util.OsPlatform.runForOutput("/usr/sbin/scutil", "--proxy")
+            ?: return Inspect.Unavailable
+        val kv = out.lines().mapNotNull { line ->
+            val i = line.indexOf(" : ")
+            if (i <= 0) null else line.substring(0, i).trim() to line.substring(i + 3).trim()
+        }.toMap()
+        if (kv["ProxyAutoConfigEnable"] == "1") {
+            return parse(1, null, kv["ProxyAutoConfigURLString"] ?: "PAC")
+        }
+        for ((prefix, defaultPort) in listOf("HTTP" to DEFAULT_HTTP_PORT, "HTTPS" to DEFAULT_HTTPS_PORT, "SOCKS" to DEFAULT_SOCKS_PORT)) {
+            if (kv["${prefix}Enable"] != "1") continue
+            val host = kv["${prefix}Proxy"]?.takeIf { it.isNotBlank() } ?: continue
+            val port = kv["${prefix}Port"]?.toIntOrNull() ?: defaultPort
+            Log.i(TAG, "macOS 系统代理已启用（$prefix）：$host:$port")
+            return Inspect.Proxy(host, port.coerceIn(1, 65535))
+        }
+        Log.i(TAG, "macOS 系统代理未启用，按直连处理")
+        return Inspect.Direct
     }
 
     private fun readInt(name: String): Int? =

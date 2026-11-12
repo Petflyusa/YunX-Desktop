@@ -1,6 +1,7 @@
 package com.yunx.app.data.security
 
 import com.yunx.app.util.Log
+import com.yunx.app.util.OsPlatform
 import com.sun.jna.platform.win32.Advapi32Util
 import com.sun.jna.platform.win32.Crypt32Util
 import com.sun.jna.platform.win32.WinReg
@@ -116,14 +117,16 @@ object DbKeyStore {
         val actual = when {
             body.startsWith("mk:v1:") -> DbEncryptionLevel.NORMAL
             body.startsWith("dpapi:v1:") -> DbEncryptionLevel.STRICT
+            body.startsWith("keychain:v1:") -> DbEncryptionLevel.STRICT
             else -> throw IllegalStateException("未知的密钥封装格式")
         }
         // 封装格式自带标识，按格式解包即可；与配置档位不一致时只记一条（可能是手动改过偏好）
         if (actual != level) {
             Log.w(TAG, "密钥封装格式（${actual.label}）与配置档位（${level.label}）不一致，按文件实际格式解包")
         }
-        return when (actual) {
-            DbEncryptionLevel.NORMAL -> unwrapMachineKey(body.removePrefix("mk:v1:"))
+        return when {
+            actual == DbEncryptionLevel.NORMAL -> unwrapMachineKey(body.removePrefix("mk:v1:"))
+            body.startsWith("keychain:v1:") -> unwrapKeychain(body.removePrefix("keychain:v1:"))
             else -> unwrapDpapi(body.removePrefix("dpapi:v1:"))
         }.also {
             require(it.size == 32) { "invalid credential key length" }
@@ -137,7 +140,8 @@ object DbKeyStore {
         val content = when (level) {
             DbEncryptionLevel.LOOSE -> key
             DbEncryptionLevel.NORMAL -> wrapMachineKey(key).toByteArray(Charsets.UTF_8)
-            DbEncryptionLevel.STRICT -> wrapDpapi(key).toByteArray(Charsets.UTF_8)
+            DbEncryptionLevel.STRICT ->
+                (if (OsPlatform.isMac) wrapKeychain(key) else wrapDpapi(key)).toByteArray(Charsets.UTF_8)
             DbEncryptionLevel.STRICTEST -> throw IllegalStateException("严格档需要 SQLCipher 支持，暂未实现")
         }
         file.parentFile?.mkdirs()
@@ -217,8 +221,11 @@ object DbKeyStore {
         )
     }
 
-    /** Windows MachineGuid（HKLM\SOFTWARE\Microsoft\Cryptography），普通用户可读 */
-    private fun machineGuid(): String? = runCatching {
+    /**
+     * 机器唯一标识：Windows 读 MachineGuid（HKLM\SOFTWARE\Microsoft\Cryptography，普通用户可读）；
+     * macOS 读 IOPlatformUUID（硬件 UUID，重装系统也不变）。
+     */
+    private fun machineGuid(): String? = if (OsPlatform.isMac) macPlatformUuid() else runCatching {
         Advapi32Util.registryGetStringValue(
             WinReg.HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", "MachineGuid"
         ).takeIf { it.isNotBlank() }
@@ -239,4 +246,42 @@ object DbKeyStore {
 
     private fun isWindows(): Boolean =
         System.getProperty("os.name").orEmpty().lowercase().contains("win")
+
+    // ---------- macOS ----------
+
+    /** `ioreg -rd1 -c IOPlatformExpertDevice` 输出里的 "IOPlatformUUID" = "XXXXXXXX-..." */
+    private fun macPlatformUuid(): String? {
+        val out = OsPlatform.runForOutput("/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice") ?: return null
+        return Regex("\"IOPlatformUUID\"\\s*=\\s*\"([0-9A-Fa-f-]+)\"").find(out)
+            ?.groupValues?.get(1)?.takeIf { it.isNotBlank() }
+    }
+
+    /** 钥匙串条目：service 固定，account 每次包裹随机生成（文件里只记 account，不含密钥本身） */
+    private const val KEYCHAIN_SERVICE = "YunX-Desktop credential key"
+    private const val SECURITY_BIN = "/usr/bin/security"
+
+    /**
+     * 较为严格档（macOS）：把主密钥存进当前用户的登录钥匙串（绑定当前 macOS 用户，换机/换用户无法读取）。
+     * 文件内容为 `yunx:key:keychain:v1:<account>`。
+     */
+    private fun wrapKeychain(key: ByteArray): String {
+        require(OsPlatform.isMac) { "钥匙串仅在 macOS 上可用" }
+        val account = "key-" + java.util.UUID.randomUUID().toString()
+        val secret = Base64.getEncoder().encodeToString(key)
+        // -U：已存在则更新
+        val ok = OsPlatform.runForOutput(
+            SECURITY_BIN, "add-generic-password", "-U",
+            "-s", KEYCHAIN_SERVICE, "-a", account, "-w", secret
+        ) != null
+        check(ok) { "写入 macOS 钥匙串失败" }
+        return "$PREFIX" + "keychain:v1:" + account
+    }
+
+    private fun unwrapKeychain(account: String): ByteArray {
+        require(OsPlatform.isMac) { "钥匙串仅在 macOS 上可用" }
+        val secret = OsPlatform.runForOutput(
+            SECURITY_BIN, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"
+        ) ?: throw MachineFingerprintUnavailable("暂时读不到钥匙串条目（可能被拒绝访问），本次不做密钥解包")
+        return Base64.getDecoder().decode(secret.trim())
+    }
 }

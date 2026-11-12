@@ -1,0 +1,159 @@
+name: macOS DMG 构建
+
+# 在 GitHub 的 macOS 机器上构建云析 macOS 版（.dmg）：
+# - Apple Silicon（arm64）与 Intel（x64）各打一份；
+# - 推送到 main / 手动触发：产物作为 Actions artifact 上传（保留 14 天）；
+# - 推送 v* 标签：额外创建 GitHub Release 并附上两个 dmg。
+# 构建后会在 runner 上实际启动一次应用并跑内嵌浏览器冒烟（--jcef-smoke），日志一并上传，方便排查。
+#
+# 说明：未做 Apple 签名 / 公证。首次打开需在 Finder 里右键 →「打开」，
+# 或执行：xattr -dr com.apple.quarantine /Applications/YunX-Desktop.app
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-dmg-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dmg:
+    name: 构建 dmg（${{ matrix.arch }}）
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 缓存 Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle.properties', '**/*.gradle.kts') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-${{ matrix.arch }}-
+
+      # 由 icon.png 生成 .icns（build.gradle.kts 在配置期检测到该文件就用作应用图标）
+      - name: 生成应用图标
+        run: |
+          set -euo pipefail
+          src=desktop/src/main/resources/icon.png
+          set_dir=$(mktemp -d)/YunX.iconset
+          mkdir -p "$set_dir" desktop/build/macos
+          for s in 16 32 128 256 512; do
+            sips -z $s $s "$src" --out "$set_dir/icon_${s}x${s}.png" >/dev/null
+            d=$((s * 2))
+            sips -z $d $d "$src" --out "$set_dir/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$set_dir" -o desktop/build/macos/YunX-Desktop.icns
+          ls -la desktop/build/macos
+
+      - name: 构建 dmg
+        run: java -Xmx64m -Dorg.gradle.appname=gradlew -jar gradle/wrapper/gradle-wrapper.jar :desktop:packageDmg --console=plain --stacktrace
+
+      - name: 整理产物
+        id: dist
+        run: |
+          set -euo pipefail
+          version=$(head -n1 version.txt | tr -d '[:space:]')
+          src=$(ls desktop/build/compose/binaries/main/dmg/*.dmg | head -n1)
+          out="YunX-Desktop-${version}-macos-${{ matrix.arch }}.dmg"
+          mkdir -p dist
+          cp "$src" "dist/$out"
+          echo "name=$out" >> "$GITHUB_OUTPUT"
+          mb=$(du -m "dist/$out" | cut -f1)
+          echo "### ${out}（${mb} MB）" >> "$GITHUB_STEP_SUMMARY"
+
+      # 冒烟：挂载 dmg → 启动应用 25 秒看是否崩溃 → 跑一次内嵌浏览器（JCEF）冒烟
+      - name: 启动冒烟测试
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mnt=$(mktemp -d)
+          hdiutil attach "dist/${{ steps.dist.outputs.name }}" -nobrowse -mountpoint "$mnt" >/dev/null
+          app=$(ls -d "$mnt"/*.app | head -n1)
+          cp -R "$app" "$RUNNER_TEMP/"
+          hdiutil detach "$mnt" >/dev/null || true
+          bin="$RUNNER_TEMP/$(basename "$app")/Contents/MacOS/YunX-Desktop"
+          export YUNX_DESKTOP_DATA_DIR="$RUNNER_TEMP/yunx-data"
+
+          echo "== 启动主界面 25s =="
+          "$bin" > "$RUNNER_TEMP/app-stdout.log" 2>&1 &
+          pid=$!
+          sleep 25
+          if kill -0 $pid 2>/dev/null; then
+            echo "应用仍在运行：OK"
+            kill $pid; sleep 3; kill -9 $pid 2>/dev/null || true
+          else
+            echo "::warning::应用在 25 秒内退出了，见 app-stdout.log"
+          fi
+          rm -f "$YUNX_DESKTOP_DATA_DIR/yunx-instance.lock"
+
+          echo "== 内嵌浏览器冒烟 =="
+          "$bin" --jcef-smoke https://example.com > "$RUNNER_TEMP/jcef-smoke.log" 2>&1 &
+          pid=$!
+          for i in $(seq 1 150); do kill -0 $pid 2>/dev/null || break; sleep 1; done
+          kill -9 $pid 2>/dev/null || true
+          grep SMOKE "$RUNNER_TEMP/jcef-smoke.log" || echo "::warning::没有 SMOKE 输出，见 jcef-smoke.log"
+          grep -q "SMOKE: done" "$RUNNER_TEMP/jcef-smoke.log" && echo "JCEF 冒烟通过" || echo "::warning::JCEF 冒烟未完成"
+
+          mkdir -p smoke-logs
+          cp "$RUNNER_TEMP"/*.log smoke-logs/ 2>/dev/null || true
+          cp -R "$YUNX_DESKTOP_DATA_DIR/files" smoke-logs/data-files 2>/dev/null || true
+
+      - name: 上传 dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.dist.outputs.name }}
+          path: dist/*.dmg
+          retention-days: 14
+          compression-level: 0
+
+      - name: 上传冒烟日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs-${{ matrix.arch }}
+          path: smoke-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  release:
+    name: 发布 Release
+    needs: dmg
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: YunX-Desktop-*.dmg
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+          generate_release_notes: true

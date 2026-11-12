@@ -41,6 +41,8 @@ object PositionPicker {
         colorRgb: Int,
         reduceMotion: Boolean
     ): Position? {
+        // macOS / Linux：没有 C# 遮罩进程，用 Swing 半透明可拖动框代替（macOS 原生支持逐像素透明）
+        if (!OsPlatform.isWindows) return pickSwing(boxWidth, boxHeight, initialX, initialY, colorRgb)
         val resolved = resolveExe()
         if (resolved == null) {
             Log.w(TAG, "未找到 $EXE_NAME，无法设置主窗口位置（jar 内 yunx/$EXE_NAME 资源缺失，且开发态 build\\ 下也没有）")
@@ -77,6 +79,78 @@ object PositionPicker {
             // 从 jar 一次性释放出来的临时 exe：遮罩一退出立即销毁
             if (resolved.temporary) deleteQuietly(resolved.exe)
         }
+    }
+
+    /**
+     * 跨平台兜底选位器：一个与主窗口同尺寸、半透明着色的无边框窗口，拖动到目标位置后点「保存」。
+     * 阻塞调用线程直到用户保存 / 取消 / 按 Esc（调用方已在后台线程）。
+     */
+    private fun pickSwing(boxWidth: Int, boxHeight: Int, initialX: Int, initialY: Int, colorRgb: Int): Position? {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var result: Position? = null
+        java.awt.EventQueue.invokeLater {
+            val tint = java.awt.Color(colorRgb and 0xFFFFFF)
+            val frame = javax.swing.JFrame("设置主窗口位置")
+            frame.isUndecorated = true
+            frame.isAlwaysOnTop = true
+            frame.background = java.awt.Color(tint.red, tint.green, tint.blue, 70)
+            frame.setBounds(initialX, initialY, boxWidth.coerceAtLeast(320), boxHeight.coerceAtLeast(200))
+
+            fun finish(save: Boolean) {
+                if (save) result = Position(frame.x, frame.y)
+                frame.dispose()
+                latch.countDown()
+            }
+
+            val panel = object : javax.swing.JPanel(java.awt.GridBagLayout()) {
+                override fun paintComponent(g: java.awt.Graphics) {
+                    val g2 = g as java.awt.Graphics2D
+                    g2.color = java.awt.Color(tint.red, tint.green, tint.blue, 70)
+                    g2.fillRect(0, 0, width, height)
+                    g2.color = tint
+                    g2.stroke = java.awt.BasicStroke(4f)
+                    g2.drawRect(2, 2, width - 4, height - 4)
+                }
+            }
+            panel.isOpaque = false
+            val box = javax.swing.Box.createVerticalBox()
+            val hint = javax.swing.JLabel("拖动此框到主窗口要出现的位置")
+            hint.font = hint.font.deriveFont(java.awt.Font.BOLD, 18f)
+            hint.alignmentX = java.awt.Component.CENTER_ALIGNMENT
+            val buttons = javax.swing.JPanel().apply { isOpaque = false }
+            buttons.add(javax.swing.JButton("保存").apply { addActionListener { finish(true) } })
+            buttons.add(javax.swing.JButton("取消").apply { addActionListener { finish(false) } })
+            box.add(hint)
+            box.add(javax.swing.Box.createVerticalStrut(12))
+            box.add(buttons)
+            panel.add(box)
+
+            // 拖动整个框
+            val drag = object : java.awt.event.MouseAdapter() {
+                var origin: java.awt.Point? = null
+                override fun mousePressed(e: java.awt.event.MouseEvent) { origin = e.point }
+                override fun mouseDragged(e: java.awt.event.MouseEvent) {
+                    val o = origin ?: return
+                    val p = e.locationOnScreen
+                    frame.setLocation(p.x - o.x, p.y - o.y)
+                }
+            }
+            panel.addMouseListener(drag)
+            panel.addMouseMotionListener(drag)
+            panel.registerKeyboardAction(
+                { finish(false) },
+                javax.swing.KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_ESCAPE, 0),
+                javax.swing.JComponent.WHEN_IN_FOCUSED_WINDOW
+            )
+            frame.addWindowListener(object : java.awt.event.WindowAdapter() {
+                override fun windowClosing(e: java.awt.event.WindowEvent) { finish(false) }
+            })
+            frame.contentPane = panel
+            frame.isVisible = true
+            frame.toFront()
+        }
+        runCatching { latch.await() }
+        return result
     }
 
     /** 解析结果：[temporary] 为 true 表示该 exe 是从 jar 一次性释放的，用完必须删除 */

@@ -123,6 +123,26 @@ fun ComposeEmptyActivityTheme(
         isDark
     ) {
         runCatching {
+            // macOS：标题栏外观跟随应用内深浅设置（「跟随系统」时交还系统）
+            if (com.yunx.app.util.OsPlatform.isMac) {
+                val appearance = when (ThemeController.darkMode) {
+                    1 -> "NSAppearanceNameAqua"
+                    2 -> "NSAppearanceNameDarkAqua"
+                    else -> "system"
+                }
+                for (attempt in 0 until 30) {
+                    var applied = false
+                    java.awt.Window.getWindows().forEach { w ->
+                        (w as? javax.swing.RootPaneContainer)?.rootPane?.let { rp ->
+                            rp.putClientProperty("apple.awt.windowAppearance", appearance)
+                            applied = true
+                        }
+                    }
+                    if (applied) break
+                    kotlinx.coroutines.delay(100)
+                }
+                return@LaunchedEffect
+            }
             val tb = com.yunx.app.util.WindowsTitleBar
             if (!tb.isWindows) return@LaunchedEffect
             // 跟随系统模式时，直接查 Windows 注册表的真实主题开关

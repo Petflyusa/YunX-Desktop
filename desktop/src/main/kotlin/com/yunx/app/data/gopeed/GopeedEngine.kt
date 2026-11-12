@@ -63,7 +63,8 @@ object GopeedEngine {
 
     private const val TAG = "GopeedEngine"
     private const val DIR_NAME = "gopeed"
-    private const val EXE_NAME = "gopeed.exe"
+    /** Windows `gopeed.exe`；macOS 官方包里是无后缀的 `gopeed` */
+    private val EXE_NAME = com.yunx.app.util.OsPlatform.exe("gopeed")
     private const val BIN_DIR_NAME = "bin"
 
     /** 引擎 HTTP 协议的默认 UA（与 gopeed 自带默认一致）：任务未自带 UA 时使用，避免空 UA 被 CDN 限速 */
@@ -173,11 +174,16 @@ object GopeedEngine {
                 }
             }
             if (!found) {
-                throw IllegalStateException("压缩包里没有找到 $EXE_NAME（请使用 Gopeed 官方 windows-amd64 包）")
+                throw IllegalStateException(
+                    "压缩包里没有找到 $EXE_NAME（请使用 Gopeed 官方 " +
+                        (if (com.yunx.app.util.OsPlatform.isMac) "macos-arm64 / macos-amd64" else "windows-amd64") + " 包）"
+                )
             }
         } else {
             archive.copyTo(target, overwrite = true)
         }
+        // macOS：补可执行位并去掉隔离属性，否则子进程起不来
+        com.yunx.app.util.OsPlatform.makeExecutable(target)
         lastError = null
         _state.value = State.INSTALLED
         Log.i(TAG, "内核已导入：${target.absolutePath}（${kernelSize()} 字节）")

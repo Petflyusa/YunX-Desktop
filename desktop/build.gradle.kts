@@ -6,6 +6,37 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// ---- 构建宿主平台：原生依赖（SQLite / JavaFX / CEF）与打包格式按宿主切换 ----
+// Windows 维持原有裁剪包与 Exe；macOS 取官方完整包并打 Dmg（由 GitHub Actions macOS runner 构建）。
+val hostOsName = System.getProperty("os.name").lowercase()
+val hostIsMac = hostOsName.contains("mac") || hostOsName.contains("darwin")
+val hostIsWindows = hostOsName.contains("win")
+val hostIsArm64 = System.getProperty("os.arch").lowercase().let { it == "aarch64" || it == "arm64" }
+/** JavaFX 原生 classifier：win / mac / mac-aarch64 / linux */
+val javafxClassifier = when {
+    hostIsWindows -> "win"
+    hostIsMac && hostIsArm64 -> "mac-aarch64"
+    hostIsMac -> "mac"
+    hostIsArm64 -> "linux-aarch64"
+    else -> "linux"
+}
+/** jcefmaven 原生包 artifactId 后缀 */
+val jcefNativesPlatform = when {
+    hostIsWindows -> "windows-amd64"
+    hostIsMac && hostIsArm64 -> "macosx-arm64"
+    hostIsMac -> "macosx-amd64"
+    hostIsArm64 -> "linux-arm64"
+    else -> "linux-amd64"
+}
+/** macOS 上 JCEF 需要访问 AWT 内部实现（jcefmaven 文档要求的 --add-opens） */
+val macJcefJvmArgs = listOf(
+    "--add-opens=java.desktop/sun.awt=ALL-UNNAMED",
+    "--add-opens=java.desktop/sun.lwawt=ALL-UNNAMED",
+    "--add-opens=java.desktop/sun.lwawt.macosx=ALL-UNNAMED",
+    "--add-opens=java.desktop/java.awt=ALL-UNNAMED",
+    "-Dapple.awt.application.appearance=system"
+)
+
 dependencies {
     implementation(compose.desktop.currentOs)
     implementation(compose.material3)
@@ -28,7 +59,12 @@ dependencies {
     // Room -> 纯 JDBC SQLite
     // ★ 用裁剪后的本地 jar：官方包 13.6 MB，含六个平台的原生库，本项目只跑 Windows。
     //   只保留 org/sqlite/native/Windows（x86/x86_64/arm/arm64），其余代码与 META-INF 原样保留。
-    implementation(files("libs/sqlite-jdbc-3.47.1.0-win.jar"))
+    //   非 Windows 宿主（macOS 打包）改用官方完整包。
+    if (hostIsWindows) {
+        implementation(files("libs/sqlite-jdbc-3.47.1.0-win.jar"))
+    } else {
+        implementation("org.xerial:sqlite-jdbc:3.47.1.0")
+    }
     // Android 内置 org.json 的 JVM 等价物
     implementation("org.json:json:20240303")
     // 主题种子色（material-color-utilities 无公开仓库坐标；从 material 1.14.0 AAR 解包 classes.jar 本地引入）
@@ -37,10 +73,11 @@ dependencies {
     // JavaFX MediaView 播放器（M6）：JFXPanel 经 SwingPanel 嵌入 Compose。
     // 版本跟随 jvmToolchain(17)；发布目标只有 Windows，直接用 :win classifier（jar 内含原生库，
     // 首次运行由 JavaFX 自动解到用户目录缓存，jpackage 无需额外处理）
-    implementation("org.openjfx:javafx-base:17.0.13:win")
-    implementation("org.openjfx:javafx-graphics:17.0.13:win")
-    implementation("org.openjfx:javafx-media:17.0.13:win")
-    implementation("org.openjfx:javafx-swing:17.0.13:win")
+    //   classifier 按构建宿主切换（macOS：mac / mac-aarch64）
+    implementation("org.openjfx:javafx-base:17.0.13:$javafxClassifier")
+    implementation("org.openjfx:javafx-graphics:17.0.13:$javafxClassifier")
+    implementation("org.openjfx:javafx-media:17.0.13:$javafxClassifier")
+    implementation("org.openjfx:javafx-swing:17.0.13:$javafxClassifier")
 
     // GFM Markdown 渲染（README / 更新说明）。注意：必须停留在 0.33.x ——
     // 0.34.0 起改用 Compose 1.8+ 的 BasicText 签名（含 TextAutoSize），与项目锁定的
@@ -71,7 +108,8 @@ dependencies {
     //   发布包不随带这个 120MB 的 jar，改由打包脚本用 JcefNativesPacker 重打成
     //   app\jcef-natives.tar.gz（裁剪语言包），首次使用时由 JcefNativesInstaller 解开。
     //   见 portable-package.ps1 [2c/5] 与 ui/jcef/JcefNativesInstaller.kt。
-    implementation("me.friwi:jcef-natives-windows-amd64:jcef-1770317+cef-132.3.1+g144febe+chromium-132.0.6834.83")
+    //   macOS 发布包直接随带原生 jar，首次使用时由 jcefmaven 自行解包。
+    implementation("me.friwi:jcef-natives-$jcefNativesPlatform:jcef-1770317+cef-132.3.1+g144febe+chromium-132.0.6834.83")
 
     // tar.gz 读写：CEF 原生库发布包（打包期重打成 gzip，运行期自解包）
     // jcefmaven 已传递引入 commons-compress，这里显式声明版本以保证稳定
@@ -201,6 +239,8 @@ fun findMsvcVcvars(): File? {
 }
 
 val compileDarkMode by tasks.registering(Exec::class) {
+    // 仅 Windows 需要（Win32 原生菜单暗色桥接）；其它平台整个任务跳过
+    onlyIf { hostIsWindows }
     val vcvars = findMsvcVcvars()
     inputs.file(darkModeSrc)
     outputs.file(darkModeOut)
@@ -227,9 +267,12 @@ val compileDarkMode by tasks.registering(Exec::class) {
 
 // 开发运行（:desktop:run）时把 DLL 目录并入 java.library.path，并保留 JDK bin（jawt 等原生库）
 tasks.withType<JavaExec> {
-    dependsOn(compileDarkMode)
-    val jvmBin = File(System.getProperty("java.home"), "bin").absolutePath
-    systemProperty("java.library.path", "${nativeOutDir.absolutePath};$jvmBin")
+    if (hostIsWindows) {
+        dependsOn(compileDarkMode)
+        val jvmBin = File(System.getProperty("java.home"), "bin").absolutePath
+        systemProperty("java.library.path", "${nativeOutDir.absolutePath};$jvmBin")
+    }
+    if (hostIsMac) jvmArgs(macJcefJvmArgs)
 }
 
 // 收集运行时依赖 jar 路径（供便携版 app-image 打包）
@@ -258,16 +301,31 @@ tasks.register<Sync>("exportJcefNatives") {
 compose.desktop {
     application {
         mainClass = "com.yunx.app.MainKt"
+        // 与 Windows 便携包（portable-package.ps1 的 jpackage --java-options）保持一致
+        jvmArgs("-Xmx4g", "-Dfile.encoding=UTF-8")
+        if (hostIsMac) jvmArgs(*macJcefJvmArgs.toTypedArray())
         nativeDistributions {
-            targetFormats(TargetFormat.Exe)
+            if (hostIsMac) targetFormats(TargetFormat.Dmg) else targetFormats(TargetFormat.Exe)
             // sqlite-jdbc 通过反射加载 java.sql.Driver，jlink 自动检测不到，必须显式声明；
             // jdk.httpserver 是视频预览的本地回环代理（com.sun.net.httpserver），
             // jdk.unsupported.desktop 是 JavaFX 与 Swing 互操作（JFXPanel 里的 jdk.swing.interop）——
             // 两者 jdeps 都探测不到，漏了它们安装包里的预览会一律失败（无法预览 / 播放器初始化失败）
             modules("java.sql", "java.naming", "jdk.httpserver", "jdk.unsupported.desktop")
+            // 与 portable-package.ps1 的 jlink --add-modules 对齐（jdk.crypto.ec 缺失会导致大量 HTTPS 握手失败；
+            // jdk.unsupported 供 JCEF / JNA 使用 sun.misc.Unsafe）
+            modules("java.datatransfer", "java.xml", "java.prefs", "java.logging", "jdk.crypto.ec", "jdk.unsupported")
             // 每用户安装（%LOCALAPPDATA%\Programs），无需管理员权限
             windows {
                 perUserInstall = true
+            }
+            macOS {
+                bundleID = "io.github.yunx.desktop"
+                // .app 名不能含中文以外的特殊字符；Dock / 菜单栏显示名
+                dockName = "云析"
+                appCategory = "public.app-category.utilities"
+                // CI 里由 icon.png 生成 icns（见 .github/workflows/macos-dmg.yml），没有时用默认图标
+                val icns = project.file("build/macos/YunX-Desktop.icns")
+                if (icns.isFile) iconFile.set(icns)
             }
             packageName = "YunX-Desktop"
             packageVersion = appVersion

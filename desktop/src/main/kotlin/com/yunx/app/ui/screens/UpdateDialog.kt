@@ -59,8 +59,14 @@ fun UpdateDialog(
      */
     mandatory: Boolean = false
 ) {
-    val exeAsset = release.assets.firstOrNull { it.name.endsWith(".exe", true) }
-    val zipAsset = release.assets.firstOrNull { it.name.endsWith(".zip", true) }
+    // macOS：安装包槽位放 .dmg（优先匹配本机架构），不提供 Windows 便携版
+    val isMac = com.yunx.app.util.OsPlatform.isMac
+    val exeAsset = if (isMac) {
+        val arch = if (com.yunx.app.util.OsPlatform.isArm64) "arm64" else "x64"
+        release.assets.firstOrNull { it.name.endsWith(".dmg", true) && it.name.contains(arch, true) }
+            ?: release.assets.firstOrNull { it.name.endsWith(".dmg", true) }
+    } else release.assets.firstOrNull { it.name.endsWith(".exe", true) }
+    val zipAsset = if (isMac) null else release.assets.firstOrNull { it.name.endsWith(".zip", true) }
     // 说明里的图片复用 README 的自研加载器（无 Coil，走 GitHubMirror 统一镜像加速）
     GitHubMarkdownImageTransformer.mirrorPrefix = GitHubMirror.activePrefix()
     // 紧凑字号：与 README 共用同一份排版（见 ui/theme/Type.kt）
@@ -188,7 +194,7 @@ fun UpdateDialog(
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("下载安装版 (.exe)")
+                            Text(if (isMac) "下载安装包 (.dmg)" else "下载安装版 (.exe)")
                         }
                     }
                     if (onDownloadMirrorAsset != null) {

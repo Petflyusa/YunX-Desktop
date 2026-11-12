@@ -203,6 +203,9 @@ object AppContext {
      * 便携版启动器会把工作目录设为程序根目录（开发运行时为工程目录）。
      */
     private fun resolveAppRoot(): File {
+        // macOS：jpackage.app-path 指向 .app/Contents/MacOS 内部 —— 不能往签名的包里写数据，
+        // 取 .app 所在的目录作为「应用根」（便携语义：与 .app 放在一起）
+        com.yunx.app.util.OsPlatform.macAppBundle()?.parentFile?.let { return it }
         System.getProperty("jpackage.app-path")?.let { p ->
             File(p).parentFile?.takeIf { it.isDirectory }?.let { return it }
         }

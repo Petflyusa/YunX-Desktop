@@ -62,6 +62,8 @@ object DesktopActions {
     fun revealFile(path: String): Boolean {
         val file = File(path)
         if (!file.exists()) return false
+        // macOS：在 Finder 中显示并选中
+        if (OsPlatform.isMac) return OsPlatform.launch("/usr/bin/open", "-R", file.absolutePath)
         if (WindowsTitleBar.isWindows) {
             // 返回 HINSTANCE：> 32 表示成功（<= 32 是错误码），失败再退回命令行方式
             val ret = runCatching {
@@ -82,6 +84,7 @@ object DesktopActions {
     fun openDirectory(path: String): Boolean {
         val dir = File(path)
         if (!dir.isDirectory && !dir.mkdirs()) return false
+        if (OsPlatform.isMac) return OsPlatform.launch("/usr/bin/open", dir.absolutePath)
         return runCatching {
             ProcessBuilder("explorer.exe", dir.absolutePath).start()
             true
@@ -118,6 +121,13 @@ object DesktopActions {
      * 拿不到启动器 exe（开发运行 `gradle run`）时返回 false，由调用方提示手动重启。
      */
     fun restartApp(): Boolean {
+        if (OsPlatform.isMac) {
+            // macOS：等本进程退出后用 open -n 重新拉起 .app
+            val bundle = OsPlatform.macAppBundle() ?: return false
+            return OsPlatform.launch(
+                "/bin/sh", "-c", "sleep 2; /usr/bin/open -n \"\$0\"", bundle.absolutePath
+            )
+        }
         val exe = launcherExe() ?: return false
         return runCatching {
             // 用 cmd 延迟启动：本进程马上就会退出，必须等它把文件句柄都放掉。
@@ -140,6 +150,14 @@ object DesktopActions {
      * @return 是否成功发起
      */
     fun shutdownComputer(seconds: Int = 0): Boolean {
+        if (OsPlatform.isMac) {
+            // 普通用户经 System Events 关机（首次会请求「自动化」授权）；延迟由 sh sleep 实现
+            val delay = seconds.coerceAtLeast(0)
+            return OsPlatform.launch(
+                "/bin/sh", "-c",
+                "sleep $delay; /usr/bin/osascript -e 'tell application \"System Events\" to shut down'"
+            )
+        }
         if (!WindowsTitleBar.isWindows) return false
         return runCatching {
             ProcessBuilder("shutdown", "/s", "/t", seconds.coerceAtLeast(0).toString()).start()

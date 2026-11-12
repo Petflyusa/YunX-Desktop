@@ -939,7 +939,8 @@ private fun levelDescription(level: DbEncryptionLevel, supported: Boolean): Stri
     DbEncryptionLevel.NORMAL ->
         "库明文 · 凭证列加密 · 密钥用本机派生密钥包裹（绑定本机，换机器解不开）"
     DbEncryptionLevel.STRICT ->
-        "库明文 · 凭证列加密 · 密钥用 Windows DPAPI 保护（绑定当前 Windows 用户）"
+        if (com.yunx.app.util.OsPlatform.isMac) "库明文 · 凭证列加密 · 密钥存入 macOS 钥匙串（绑定当前 macOS 用户）"
+        else "库明文 · 凭证列加密 · 密钥用 Windows DPAPI 保护（绑定当前 Windows 用户）"
     DbEncryptionLevel.STRICTEST ->
         if (supported) "库整体加密 + DPAPI 保护密钥" else "库整体加密（SQLCipher）—— 暂未支持"
 }
@@ -953,7 +954,11 @@ private fun levelWarning(target: DbEncryptionLevel): String = when (target) {
         "密钥将用**本机派生密钥**包裹：绑定当前这台机器。\n" +
             "⚠ 之后把数据库/密钥拷到别的电脑、或重装系统，凭证将无法解密（表现为网盘账号全部未登录，需重新登录）。\n" +
             "如果需要便携使用，请保持「宽松」。"
-    DbEncryptionLevel.STRICT ->
+    DbEncryptionLevel.STRICT -> if (com.yunx.app.util.OsPlatform.isMac)
+        "密钥将存入 **macOS 钥匙串**：绑定当前 macOS 用户。\n" +
+            "⚠ 换用户、重装系统或换机器后，凭证将无法解密（需重新登录）。\n" +
+            "如果需要便携使用，请保持「宽松」。"
+    else
         "密钥将用 **Windows DPAPI** 保护：绑定当前 Windows 用户。\n" +
             "⚠ 换 Windows 用户、重装系统或换机器后，凭证将无法解密（需重新登录）。\n" +
             "如果需要便携使用，请保持「宽松」。"

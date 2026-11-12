@@ -127,6 +127,15 @@ object WindowsToastNotifier {
         if (!enabled) return
         lastDoneSum = doneSum
         lastTotalSum = totalSum
+        if (OsPlatform.isMac) {
+            // macOS：没有通知中心进度条，改为在 Dock 图标上画进度条
+            val now = System.currentTimeMillis()
+            if (now - lastUpdateTs.get() < UPDATE_THROTTLE_MS) return
+            lastUpdateTs.set(now)
+            val pct = if (totalSum > 0) ((doneSum * 100) / totalSum).toInt().coerceIn(0, 99) else 0
+            macDockProgress(pct)
+            return
+        }
         if (!isWindows || writer == null) return
         val now = System.currentTimeMillis()
         if (now - lastUpdateTs.get() < UPDATE_THROTTLE_MS) return
@@ -147,6 +156,13 @@ object WindowsToastNotifier {
     @Synchronized
     fun sessionEnd() {
         if (!enabled) return
+        if (OsPlatform.isMac) {
+            val completed = lastTotalSum > 0 && lastDoneSum >= lastTotalSum
+            lastDoneSum = 0; lastTotalSum = 0
+            macDockProgress(-1)
+            if (completed) OsPlatform.macNotify("云析 · 下载完成", "全部任务已下载完毕")
+            return
+        }
         if (!isWindows) return
         val completed = lastTotalSum > 0 && lastDoneSum >= lastTotalSum
         lastDoneSum = 0; lastTotalSum = 0
@@ -156,6 +172,15 @@ object WindowsToastNotifier {
         } else {
             sendLine("exit")
             closeQuietly()
+        }
+    }
+
+    /** macOS Dock 进度：0..100 显示进度条，-1 隐藏 */
+    private fun macDockProgress(pct: Int) {
+        runCatching {
+            if (!java.awt.Taskbar.isTaskbarSupported()) return
+            val tb = java.awt.Taskbar.getTaskbar()
+            if (tb.isSupported(java.awt.Taskbar.Feature.PROGRESS_VALUE)) tb.setProgressValue(pct)
         }
     }
 
