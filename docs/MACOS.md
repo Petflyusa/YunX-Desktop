@@ -1,7 +1,7 @@
 # macOS 版
 
-> 本分支在 [tidain/YunX-Desktop](https://github.com/tidain/YunX-Desktop) 的基础上增加了 macOS 支持，
-> 同样以 [AGPL-3.0](../LICENSE) 开源。解析、下载、登录、视频等核心功能与 Windows 版共用同一套代码。
+> macOS 版与 Windows 版共用同一套代码：解析、下载、登录、视频等核心功能一致，
+> 只有系统集成部分按平台分别实现（见下方差异表）。
 
 ## 安装
 
@@ -33,13 +33,20 @@ xattr -dr com.apple.quarantine /Applications/YunX-Desktop.app
 
 数据目录与 Windows 版一致：`~/.yunx-desktop`（可用环境变量 `YUNX_DESKTOP_DATA_DIR` 覆盖）。
 
+## 已知问题
+
+- 目前只在一台 Apple Silicon（M4）机器上实际运行验证过；Intel 版的打包配置已写好，但还没有真机测试。
+- 出现过一次退出时崩溃（崩溃栈在 `NSMenu performKeyEquivalent`，疑似由 Cmd+Q 触发，尚未稳定复现）。
+  崩溃后下次启动会把内嵌浏览器的数据目录隔离并重建。
+  在修复前，建议用菜单栏图标 →「退出」或直接关闭窗口来退出。
+
 ## 构建
 
 macOS 安装包必须在 macOS 上打。仓库自带 GitHub Actions 工作流
 [`.github/workflows/macos-dmg.yml`](../.github/workflows/macos-dmg.yml)：
 
 - 推送到 `main` 或在 Actions 页手动运行 → 产出 arm64 / x64 两个 dmg（Actions artifact）；
-- 推送 `v*` 标签（如 `v1.3.3-mac.1`）→ 自动创建 Release 并附上 dmg。
+- 推送 `v*` 标签 → 把两个 dmg 附加到该标签对应的 Release（Release 不存在时会新建一个）。
 
 本机有 Mac 时也可以直接构建（需要 JDK 17）：
 

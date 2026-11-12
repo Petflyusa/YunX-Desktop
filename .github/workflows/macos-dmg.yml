@@ -3,7 +3,7 @@ name: macOS DMG 构建
 # 在 GitHub 的 macOS 机器上构建云析 macOS 版（.dmg）：
 # - Apple Silicon（arm64）与 Intel（x64）各打一份；
 # - 推送到 main / 手动触发：产物作为 Actions artifact 上传（保留 14 天）；
-# - 推送 v* 标签：额外创建 GitHub Release 并附上两个 dmg。
+# - 推送 v* 标签：额外把两个 dmg 附加到该标签对应的 Release（不存在时新建；不改动已有的发布说明）。
 # 构建后会在 runner 上实际启动一次应用并跑内嵌浏览器冒烟（--jcef-smoke），日志一并上传，方便排查。
 #
 # 说明：未做 Apple 签名 / 公证。首次打开需在 Finder 里右键 →「打开」，
@@ -156,4 +156,3 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*.dmg
-          generate_release_notes: true
